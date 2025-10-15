@@ -1,280 +1,126 @@
-"""
-Auto Vertical Crop + Legendas + Trecho do Vídeo
-Transforma vídeos horizontais em verticais, com foco automático em rostos,
-detecção de fala, legenda e possibilidade de selecionar trecho do vídeo.
-"""
-
-import argparse
 import cv2
 import mediapipe as mp
 import numpy as np
-from tqdm import tqdm
+import moviepy.editor as mpedit
+import whisper
+import argparse
+import tempfile
 import os
-import shutil # Novo: Para mover e limpar arquivos
-import moviepy.editor as mp # Novo: Para lidar com áudio e mesclagem
+from tqdm import tqdm
 
-# --------------------------- Configurações ---------------------------
-THRESH_MOUTH_OPEN = 0.035
-SMOOTHING = 0.2
-ALT_INTERVAL_FRAMES = 60
-OUTPUT_HEIGHT_DEFAULT = 1080
-ASPECT_W = 9
-ASPECT_H = 16
+# ===============================
+# Função para gerar legendas com Whisper
+# ===============================
+def gerar_legendas(audio_path):
+    model = whisper.load_model("base")
+    result = model.transcribe(audio_path, language="pt")
+    legendas = []
+    for seg in result["segments"]:
+        legendas.append({
+            "start": seg["start"],
+            "end": seg["end"],
+            "text": seg["text"]
+        })
+    return legendas
 
-mp_face_mesh = mp.solutions.face_mesh
-
-# --------------------------- Funções utilitárias ---------------------------
-def landmarks_to_bbox(landmarks, frame_w, frame_h):
-    xs = np.array([lm.x for lm in landmarks]) * frame_w
-    ys = np.array([lm.y for lm in landmarks]) * frame_h
-    x_min = int(np.min(xs))
-    x_max = int(np.max(xs))
-    y_min = int(np.min(ys))
-    y_max = int(np.max(ys))
-    return x_min, y_min, x_max - x_min, y_max - y_min
-
-def mouth_open_ratio(landmarks, frame_h):
-    ys = np.array([lm.y for lm in landmarks])
-    y_min = np.min(ys)
-    y_max = np.max(ys)
-    face_h = y_max - y_min
-    if face_h <= 0:
-        return 0.0
-    lower_thresh = y_min + face_h * 0.5
-    mouth_region_idxs = np.where((ys >= lower_thresh) & (ys <= y_max))[0]
-    if len(mouth_region_idxs) < 3:
-        return 0.0
-    mouth_ys = ys[mouth_region_idxs]
-    mouth_open_rel = np.max(mouth_ys) - np.min(mouth_ys)
-    return mouth_open_rel / face_h
-
-def draw_subtitle(frame, text, font_scale=1.0, thickness=2):
-    h, w, _ = frame.shape
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
-    text_x = (w - text_size[0]) // 2
-    text_y = h - 30
-    overlay = frame.copy()
-    cv2.rectangle(overlay, (text_x - 10, text_y - text_size[1] - 10),
-                  (text_x + text_size[0] + 10, text_y + 10), (0,0,0), -1)
-    alpha = 0.5
-    frame = cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
-    cv2.putText(frame, text, (text_x, text_y), font, font_scale, (255,255,255), thickness, cv2.LINE_AA)
-    return frame
-
-def time_to_seconds(time_str):
-    """Converte 'HH:MM:SS', 'MM:SS' ou 'SS' para segundos"""
-    if time_str is None:
-        return None
-    parts = [int(p) for p in time_str.split(':')]
-    if len(parts) == 3:
-        h, m, s = parts
-    elif len(parts) == 2:
-        h = 0
-        m, s = parts
-    else:
-        h = 0
-        m = 0
-        s = parts[0]
-    return h*3600 + m*60 + s
-
-# --------------------------- Processamento do vídeo ---------------------------
-def process_video_and_merge(input_path, output_path, out_h=OUTPUT_HEIGHT_DEFAULT, smoothing=SMOOTHING,
-                            thresh_mouth=THRESH_MOUTH_OPEN, alt_interval=ALT_INTERVAL_FRAMES,
-                            start_sec=0, end_sec=None, fixed_text=None): # NOVO: fixed_text
-
-    # Arquivo temporário SÓ com o vídeo (sem áudio), que será gerado pelo OpenCV
-    temp_video_path = output_path.replace(".mp4", "_temp.mp4")
-
+# ===============================
+# Função principal de crop vertical
+# ===============================
+def processar_video(input_path, output_path, start, end, out_h, legenda_on):
+    mp_pose = mp.solutions.pose.Pose()
     cap = cv2.VideoCapture(input_path)
-    if not cap.isOpened():
-        raise RuntimeError(f"Não foi possível abrir o arquivo: {input_path}")
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    total_duration_sec = total_frames / fps
-    
-    # Se end_sec não foi definido, usa a duração total do vídeo
-    if end_sec is None:
-        end_sec = total_duration_sec
+    # Define recorte vertical
+    out_w = int(out_h * 9 / 16)
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 
-    # Garante que os limites de corte estejam dentro da duração do vídeo
-    start_sec = max(0, start_sec)
-    end_sec = min(total_duration_sec, end_sec)
-    
-    out_h = int(out_h)
-    out_w = int(round(out_h * ASPECT_W / ASPECT_H))
-    
-    # CORREÇÃO 1: Mudar codec para H.264 para evitar estiramento/qualidade ruim
-    fourcc = cv2.VideoWriter_fourcc(*"X264") # Tente X264
-    # Se X264 falhar, tente: fourcc = cv2.VideoWriter_fourcc(*"avc1")
-    
-    # Escrevemos para o arquivo TEMPORÁRIO
-    out = cv2.VideoWriter(temp_video_path, fourcc, fps, (out_w, out_h))
+    temp_video = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
+    out = cv2.VideoWriter(temp_video.name, fourcc, fps, (out_w, out_h))
 
-    # converte start/end para frames
-    start_frame = int(start_sec * fps)
-    end_frame = int(end_sec * fps)
+    start_frame = int(start * fps)
+    end_frame = int(end * fps) if end else total_frames
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
-    cur_cx = frame_w // 2
-    cur_cy = frame_h // 2
-    
-    current_frame_count = 0
+    cx_suave = width // 2
 
-    with mp_face_mesh.FaceMesh(static_image_mode=False,
-                               max_num_faces=6,
-                               refine_landmarks=True,
-                               min_detection_confidence=0.5,
-                               min_tracking_confidence=0.5) as face_mesh:
+    for i in tqdm(range(start_frame, min(end_frame, total_frames)), desc="Processando vídeo"):
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-        # O progresso da barra deve refletir apenas os frames que serão processados
-        pbar = tqdm(total=end_frame - start_frame, desc='Processando frames')
-        
-        # Posiciona o vídeo no frame inicial (start_frame)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-        frame_idx = start_frame 
+        # Detecção com MediaPipe
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        res = mp_pose.process(rgb)
+        if res.pose_landmarks:
+            pontos = res.pose_landmarks.landmark
+            xs = [p.x * width for p in pontos if p.visibility > 0.5]
+            if xs:
+                cx = np.mean(xs)
+                cx_suave = int(0.8 * cx_suave + 0.2 * cx)
+        else:
+            cx = width // 2
 
-        while True:
-            ret, frame = cap.read()
-            if not ret or frame_idx >= end_frame:
-                break
+        x1 = max(0, int(cx_suave - out_w // 2))
+        x2 = min(width, x1 + out_w)
+        crop = frame[0:height, x1:x2]
 
-            # Se a leitura falhou, mas o índice ainda está dentro do limite
-            if frame_idx < start_frame: 
-                 # Isso não deve acontecer com o cap.set() acima, mas é uma segurança.
-                 frame_idx += 1
-                 continue
+        if crop.shape[1] != out_w:
+            crop = cv2.resize(crop, (out_w, out_h))
 
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = face_mesh.process(frame_rgb)
+        out.write(crop)
 
-            faces = []
-            if results.multi_face_landmarks:
-                for i, face_landmarks in enumerate(results.multi_face_landmarks):
-                    lm = face_landmarks.landmark
-                    x_min, y_min, w_box, h_box = landmarks_to_bbox(lm, frame_w, frame_h)
-                    cx = x_min + w_box / 2
-                    cy = y_min + h_box / 2
-                    mouth_ratio = mouth_open_ratio(lm, frame_h)
-                    is_speaking = mouth_ratio >= thresh_mouth
-                    faces.append({
-                        'center': (cx, cy),
-                        'area': w_box * h_box,
-                        'is_speaking': is_speaking,
-                        'id': i,
-                    })
-
-            # decisão do foco
-            target_cx = frame_w / 2
-            target_cy = frame_h / 2
-            subtitle_text = "Ninguém na cena"
-
-            if fixed_text is not None: # NOVO: Prioriza texto fixo da CLI
-                subtitle_text = fixed_text
-            elif len(faces) == 1:
-                target_cx, target_cy = faces[0]['center']
-                subtitle_text = "Falando" if faces[0]['is_speaking'] else "Foco alternado"
-            elif len(faces) > 1:
-                speaking_faces = [f for f in faces if f['is_speaking']]
-                if speaking_faces:
-                    chosen = max(speaking_faces, key=lambda f: f['area'])
-                    target_cx, target_cy = chosen['center']
-                    subtitle_text = "Falando"
-                else:
-                    # Usa o current_frame_count (índice dentro do trecho) para alternar o foco
-                    idx = (current_frame_count // alt_interval) % len(faces) 
-                    chosen = faces[idx]
-                    target_cx, target_cy = chosen['center']
-                    subtitle_text = "Foco alternado"
-
-            # suavização exponencial
-            cur_cx = (1 - smoothing) * cur_cx + smoothing * target_cx
-            cur_cy = (1 - smoothing) * cur_cy + smoothing * target_cy
-
-            # crop seguro
-            crop_w = min(out_w, frame_w)
-            crop_h = min(out_h, frame_h)
-            x1 = max(0, min(int(cur_cx - crop_w // 2), frame_w - crop_w))
-            y1 = max(0, min(int(cur_cy - crop_h // 2), frame_h - crop_h))
-            crop = frame[y1:y1 + crop_h, x1:x1 + crop_w]
-            
-            # Redimensionamento
-            if crop.shape[0] != out_h or crop.shape[1] != out_w:
-                crop = cv2.resize(crop, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
-
-            crop = draw_subtitle(crop, subtitle_text)
-            out.write(crop)
-            frame_idx += 1
-            current_frame_count += 1
-            pbar.update(1)
-
-        pbar.close()
     cap.release()
     out.release()
-    
-    # CORREÇÃO 2: Mesclagem do Áudio com MoviePy
-    print("\nIniciando mesclagem de áudio...")
-    
-    try:
-        # Carrega o vídeo original e corta para o trecho desejado
-        original_clip = mp.VideoFileClip(input_path)
-        audio_clip = original_clip.subclip(start_sec, end_sec)
-        
-        # Carrega o vídeo processado pelo OpenCV (sem áudio)
-        final_clip = mp.VideoFileClip(temp_video_path)
-        
-        # Define o áudio e exporta para o arquivo de SAÍDA FINAL
-        final_clip = final_clip.set_audio(audio_clip.audio)
-        final_clip.write_videofile(
-            output_path, 
-            codec='libx264', # H.264
-            audio_codec='aac', 
-            temp_audiofile='temp-audio.m4a', 
-            remove_temp=True,
-            logger=None # Para não poluir a saída com logs do MoviePy
-        )
-        
-        print(f"✅ Processamento e mesclagem concluídos. Arquivo salvo em: {output_path}")
 
-    except Exception as e:
-        print(f"⚠️ Erro ao mesclar áudio com MoviePy: {e}. O arquivo foi salvo SEM ÁUDIO.")
-        # Se a mesclagem falhar (ex: codecs faltando), move o arquivo temporário para o destino final.
-        shutil.move(temp_video_path, output_path)
-        
-    finally:
-        # Limpa o arquivo temporário do vídeo sem áudio
-        if os.path.exists(temp_video_path):
-            os.remove(temp_video_path)
+    # ===============================
+    # Gera vídeo final com MoviePy
+    # ===============================
+    clip = mpedit.VideoFileClip(temp_video.name).subclip(start, end)
+    audio = mpedit.VideoFileClip(input_path).audio.subclip(start, end)
+    clip = clip.set_audio(audio)
 
+    if legenda_on:
+        # Extrair áudio para Whisper
+        temp_audio = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+        clip.audio.write_audiofile(temp_audio.name, verbose=False, logger=None)
 
-# --------------------------- CLI ---------------------------
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Auto Vertical Crop + Legendas + Trecho do vídeo')
-    parser.add_argument('--input', '-i', required=True, help='Arquivo de entrada (vídeo horizontal)')
-    parser.add_argument('--output', '-o', required=True, help='Arquivo de saída .mp4')
-    parser.add_argument('--out_h', type=int, default=OUTPUT_HEIGHT_DEFAULT, help='Altura do vídeo de saída (px)')
-    parser.add_argument('--smoothing', type=float, default=SMOOTHING, help='Coeficiente de suavização (0-1)')
-    parser.add_argument('--mouth_thresh', type=float, default=THRESH_MOUTH_OPEN, help='Limiar para boca aberta')
-    parser.add_argument('--alt_interval', type=int, default=ALT_INTERVAL_FRAMES, help='Frames por rosto ao alternar quando ninguém fala')
-    parser.add_argument('--start', type=str, default="0:0:0", help='Tempo inicial (SS, MM:SS ou HH:MM:SS)')
-    parser.add_argument('--end', type=str, default=None, help='Tempo final (SS, MM:SS ou HH:MM:SS)')
-    parser.add_argument('--text', type=str, default=None, help='Texto de legenda fixa para aparecer em todo o trecho.') # NOVO: Legenda Fixa
+        legendas = gerar_legendas(temp_audio.name)
+        clips_legenda = []
+        for seg in legendas:
+            txt = mpedit.TextClip(seg["text"], fontsize=40, color="white", stroke_color="black", stroke_width=2, size=(out_w - 40, None), method='caption')
+            txt = txt.set_start(seg["start"]).set_end(seg["end"]).set_position(("center", out_h - 100))
+            clips_legenda.append(txt)
+        final = mpedit.CompositeVideoClip([clip, *clips_legenda])
+        temp_audio.close()
+    else:
+        final = clip
 
+    final.write_videofile(output_path, codec='libx264', audio_codec='aac', threads=4)
+    os.remove(temp_video.name)
+
+# ===============================
+# Argumentos do CMD
+# ===============================
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--start", type=str, default="00:00:00")
+    parser.add_argument("--end", type=str, default=None)
+    parser.add_argument("--out_h", type=int, default=1080)
+    parser.add_argument("--legenda", type=str, default="off")
     args = parser.parse_args()
-    start_sec = time_to_seconds(args.start)
-    end_sec = time_to_seconds(args.end) if args.end else None
 
-    # Chamada da função de processamento principal (renomeada e com novo argumento)
-    process_video_and_merge(
-        input_path=args.input,
-        output_path=args.output,
-        out_h=args.out_h,
-        smoothing=args.smoothing,
-        thresh_mouth=args.mouth_thresh,
-        alt_interval=args.alt_interval,
-        start_sec=start_sec,
-        end_sec=end_sec,
-        fixed_text=args.text # Passa a legenda fixa
-    )
+    def parse_time(t):
+        h, m, s = map(int, t.split(":"))
+        return h * 3600 + m * 60 + s
+
+    start = parse_time(args.start)
+    end = parse_time(args.end) if args.end else None
+    legenda_on = args.legenda.lower() == "on"
+
+    processar_video(args.input, args.output, start, end, args.out_h, legenda_on)
