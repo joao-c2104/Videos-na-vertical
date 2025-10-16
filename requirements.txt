@@ -1,0 +1,7 @@
+opencv-python
+moviepy
+mediapipe
+openai-whisper
+numpy
+Pillow
+tqdm
