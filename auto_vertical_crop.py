@@ -1,3 +1,4 @@
+# auto_vertical_crop.py (corrigido)
 import sys
 import os
 import tempfile
@@ -10,228 +11,222 @@ try:
     from moviepy.editor import VideoFileClip, AudioFileClip
     from PIL import Image, ImageDraw, ImageFont
     import whisper
-except ImportError:
-    print("ERRO: Uma ou mais dependências não estão instaladas.")
-    print("Por favor, execute o comando no seu terminal:")
-    print("pip install -r requirements.txt")
+except ImportError as e:
+    print("ERRO: Uma ou mais dependências não estão instaladas:", e)
+    print("Por favor, execute no terminal: pip install opencv-python mediapipe numpy tqdm moviepy Pillow openai-whisper")
     sys.exit(1)
 
 
-def draw_subtitle_pil(frame, text, frame_width):
+def draw_subtitle_pil(frame_bgr, text, frame_width):
     """
-    @description Desenha o texto da legenda com fundo semitransparente e melhor espaçamento.
-    @param frame O frame (imagem) onde o texto será desenhado.
-    @param text O texto da legenda a ser exibido.
-    @param frame_width A largura do frame para cálculo de centralização.
-    @return O frame com a legenda desenhada.
+    Desenha texto (com acentos) sobre o frame BGR, retornando BGR.
+    Usa uma faixa semitransparente atrás do texto.
     """
-    frame_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)).convert("RGBA")
-    overlay = Image.new("RGBA", frame_pil.size, (255, 255, 255, 0))
+    frame_rgba = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)).convert("RGBA")
+    overlay = Image.new("RGBA", frame_rgba.size, (255, 255, 255, 0))
     draw = ImageDraw.Draw(overlay)
 
-    font_options = [
-        os.path.join("src", "fonts", "arial.ttf"),
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-        "/Library/Fonts/Arial.ttf",
-        "/usr/share/fonts/truetype/msttcorefonts/Arial.ttf"
+    # Procura por fontes comuns, se não usar padrão
+    font_candidates = [
+        "arial.ttf",
+        os.path.join("C:\\Windows\\Fonts", "arial.ttf"),
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     ]
-    
-    selected_font = None
-    font_size = max(28, int(frame_width / 18))
-
-    for path in font_options:
-        if os.path.exists(path):
-            try:
-                font = ImageFont.truetype(path, font_size)
-                selected_font = font
+    font = None
+    font_size = max(24, int(frame_width / 20))
+    for p in font_candidates:
+        try:
+            if os.path.exists(p):
+                font = ImageFont.truetype(p, font_size)
                 break
-            except Exception:
-                continue
-
-    if selected_font is None:
-        print(f"\nAtenção: Nenhuma fonte Arial encontrada. Usando fonte padrão.")
+        except Exception:
+            font = None
+    if font is None:
         font = ImageFont.load_default()
-        selected_font = font
-    
-    font = selected_font
 
-    max_width = frame_width * 0.9
+    # quebra em linhas para caber na largura
+    max_width = int(frame_width * 0.9)
     words = text.split()
     lines = []
-    current_line = []
-    
-    for word in words:
-        test_line = " ".join(current_line + [word])
-        bbox = draw.textbbox((0, 0), test_line, font=font)
-        text_w = bbox[2] - bbox[0]
-
-        if text_w <= max_width:
-            current_line.append(word)
+    cur = ""
+    for w in words:
+        test = (cur + " " + w).strip()
+        bbox = draw.textbbox((0,0), test, font=font)
+        tw = bbox[2] - bbox[0]
+        if tw <= max_width:
+            cur = test
         else:
-            if current_line: 
-                lines.append(" ".join(current_line))
-            current_line = [word]
-            
-            if draw.textbbox((0, 0), word, font=font)[2] - draw.textbbox((0, 0), word, font=font)[0] > max_width:
-                 if not current_line:
-                    current_line.append(word)
-
-    if current_line:
-        lines.append(" ".join(current_line))
+            if cur:
+                lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
 
     try:
-        line_height = font.getbbox("Tg")[3] - font.getbbox("Tg")[1]
-    except AttributeError:
-        line_height = font.getsize("A")[1] 
-    
-    spacing = int(line_height * 0.5)
-    total_line_height = line_height + spacing
+        line_h = font.getbbox("Mg")[3] - font.getbbox("Mg")[1]
+    except Exception:
+        line_h = font.getsize("A")[1]
 
-    total_text_height = len(lines) * total_line_height - spacing if lines else 0
-    y_start = frame_pil.height - total_text_height - int(frame_pil.height * 0.1)
+    spacing = int(line_h * 0.3)
+    total_h = len(lines) * (line_h + spacing) - spacing
+    y = frame_rgba.height - total_h - int(frame_rgba.height * 0.06)
 
-    for i, line in enumerate(lines):
-        bbox_line = draw.textbbox((0, 0), line, font=font)
-        text_width = bbox_line[2] - bbox_line[0]
+    for line in lines:
+        bbox = draw.textbbox((0,0), line, font=font)
+        tw = bbox[2] - bbox[0]
+        x = (frame_rgba.width - tw) // 2
+        # desenha retângulo semitransparente
+        pad = 10
+        draw.rectangle([x-pad, y-pad, x+tw+pad, y+line_h+pad], fill=(0,0,0,150))
+        draw.text((x, y), line, font=font, fill=(255,255,255,255))
+        y += line_h + spacing
 
-        x = (frame_width - text_width) / 2
-        y = y_start + (i * total_line_height)
-
-        background_padding = 10
-        bg_x0 = max(0, x - background_padding)
-        bg_y0 = y - background_padding
-        bg_x1 = min(frame_width, x + text_width + background_padding)
-        bg_y1 = min(frame_pil.height, y + line_height + background_padding)
-        draw.rectangle([bg_x0, bg_y0, bg_x1, bg_y1], fill=(0, 0, 0, 150))
-
-        draw.text((x, y), line, font=font, fill=(255, 255, 255, 255))
-
-    combined = Image.alpha_composite(frame_pil, overlay)
-    
-    return cv2.cvtColor(np.array(combined), cv2.COLOR_RGBA2BGR)
+    combined = Image.alpha_composite(frame_rgba, overlay)
+    out_bgr = cv2.cvtColor(np.array(combined.convert("RGB")), cv2.COLOR_RGB2BGR)
+    return out_bgr
 
 
 def process_video(input_path, output_path, out_h=1080, legenda="on", start=None, end=None):
     """
-    @description Função principal que carrega um vídeo, detecta rostos para criar um corte vertical,
-                 gera legendas automáticas e renderiza o vídeo final.
-    @param input_path Caminho para o vídeo de entrada.
-    @param output_path Caminho para salvar o vídeo processado.
-    @param out_h Altura final do vídeo em pixels.
-    @param legenda 'on' para gerar legendas, 'off' para pular.
-    @param start Tempo de início do corte (e.g., 'hh:mm:ss').
-    @param end Tempo de fim do corte (e.g., 'hh:mm:ss').
+    Função principal: cria crop vertical 9:16 focado em rosto, gera legendas (opcional)
+    e escreve arquivo final com áudio.
+    start/end: None ou strings 'HH:MM:SS' ou 'MM:SS'
+    legenda: 'on'/'off'
     """
     if not os.path.exists(input_path):
-        print(f"ERRO: O arquivo de entrada não foi encontrado em '{input_path}'")
-        return
+        raise FileNotFoundError(f"Arquivo não encontrado: {input_path}")
 
-    try:        
-        print("🗣️  Carregando Whisper (base)...")
-        model = whisper.load_model("base") 
-        
-        print("🎬 Lendo o arquivo de vídeo...")
-        video_full = VideoFileClip(input_path) 
+    # Carrega Whisper (modelo base para menor uso de RAM; mude para 'medium' se quiser)
+    print("🗣️ Carregando Whisper (base)...")
+    model = whisper.load_model("base")  # troque para "medium" se tiver memória e GPU
 
-        start_time = start if start and start.strip() != "" else None
-        end_time = end if end and end.strip() != "" else None
-        
-        # O subclip é feito aqui. Se os tempos forem inválidos, o MoviePy lançará um ValueError
-        video = video_full.subclip(start_time, end_time) if start_time or end_time else video_full
-        
-        audio_path = tempfile.mktemp(suffix=".mp3")
-        video.audio.write_audiofile(audio_path, logger=None)
-        
-        subtitle_dict = {}
-        if legenda.lower() == "on":
-            print("🗣️  Gerando legendas automáticas com Whisper... Isso pode demorar.")
-            result = model.transcribe(audio_path, language="pt", fp16=False)
-            for seg in result["segments"]:
-                subtitle_dict[(seg["start"], seg["end"])] = seg["text"]
-                
-        mp_face_mesh = mp.solutions.face_mesh
-        face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1, min_detection_confidence=0.5)
-        
-        tracking_state = {'last_cx': -1, 'last_cy': -1}
+    print("🎬 Abrindo vídeo com MoviePy...")
+    video_full = VideoFileClip(input_path)
+    # subclip se start/end passados
+    start_time = start if start and start.strip() != "" else None
+    end_time = end if end and end.strip() != "" else None
+    video = video_full.subclip(start_time, end_time) if (start_time or end_time) else video_full
 
-        def process_frame(get_frame, t):
-            frame = get_frame(t)
-            h, w, _ = frame.shape
-            
-            target_aspect_ratio = 9.0 / 16.0
-            crop_h = out_h
-            crop_w = int(crop_h * target_aspect_ratio)
-            crop_w -= (crop_w % 2)
-            
-            cx, cy = w // 2, h // 2
-            
-            results = face_mesh.process(frame)
-            
-            if results.multi_face_landmarks:
-                lm = results.multi_face_landmarks[0].landmark
-                x_coords = [landmark.x * w for landmark in lm]
-                y_coords = [landmark.y * h for landmark in lm]
-                cx, cy = int(np.mean(x_coords)), int(np.mean(y_coords))
-                if tracking_state['last_cx'] == -1:
-                    tracking_state['last_cx'], tracking_state['last_cy'] = cx, cy
+    # extrai áudio temporário
+    audio_tmp = tempfile.mktemp(suffix=".mp3")
+    video.audio.write_audiofile(audio_tmp, logger=None)
 
-            if tracking_state['last_cx'] != -1:
-                cx = int(tracking_state['last_cx'] * 0.9 + cx * 0.1)
-                cy = int(tracking_state['last_cy'] * 0.1 + cy * 0.1)
-            
-            tracking_state['last_cx'], tracking_state['last_cy'] = cx, cy
+    # gerar legendas com whisper (se pedido)
+    subtitle_segments = []
+    if legenda.lower() == "on":
+        print("🗣️ Gerando legendas com Whisper (pode demorar)...")
+        result = model.transcribe(audio_tmp, language="pt", fp16=False)
+        subtitle_segments = result.get("segments", [])
+        print(f"✅ Legendas geradas: {len(subtitle_segments)} segmentos")
 
-            x1 = max(0, cx - crop_w // 2)
-            y1 = max(0, cy - crop_h // 2)
-            if x1 + crop_w > w: x1 = w - crop_w
-            if y1 + crop_h > h: y1 = h - crop_h
-            x1 = max(0, x1)
-            y1 = max(0, y1)
-            
-            cropped_frame_rgb = frame[y1:y1+crop_h, x1:x1+crop_w]
-            
-            if legenda.lower() == "on":
-                text = ""
-                for (start_t, end_t), s_text in subtitle_dict.items():
-                    if start_t <= t <= end_t:
-                        text = s_text
-                        break
-                if text:
-                    cropped_frame_bgr = cv2.cvtColor(cropped_frame_rgb, cv2.COLOR_RGB2BGR)
-                    processed_frame_bgr = draw_subtitle_pil(cropped_frame_bgr, text.strip(), crop_w)
-                    cropped_frame_rgb = cv2.cvtColor(processed_frame_bgr, cv2.COLOR_BGR2RGB)
+    # --- configurações de crop 9:16 ---
+    target_h = int(out_h)
+    target_w = int(round(target_h * 9 / 16))
 
-            return cropped_frame_rgb
+    mp_face_mesh = mp.solutions.face_mesh
+    face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=2,
+                                      refine_landmarks=True, min_detection_confidence=0.5,
+                                      min_tracking_confidence=0.5)
 
-        processed_clip = video.fl(process_frame)
+    # estado de tracking para suavização
+    last_cx, last_cy = None, None
+    smoothing = 0.15  # suavização exponencial (0..1)
 
-        print("🎶 Montando o vídeo final com áudio...")
-        processed_clip.set_audio(AudioFileClip(audio_path)).write_videofile(
-            output_path, 
-            codec="libx264", 
-            audio_codec="aac", 
-            logger='bar', # MoviePy usa este logger embutido
-            ffmpeg_params=['-pix_fmt', 'yuv420p']
-        )
+    fps = video.fps
 
-        face_mesh.close()
-        os.remove(audio_path)
-        print(f"✅ Concluído! Vídeo salvo em: {output_path}")
+    # função que MoviePy usa para gerar frames processados
+    def process_frame(get_frame, t):
+        nonlocal last_cx, last_cy
+        frame_rgb = get_frame(t)  # MoviePy fornece frame em RGB
+        h, w, _ = frame_rgb.shape
 
-    except Exception as e:
-        # A exceção é levantada para ser capturada pelo processo principal (GUI)
-        raise e
+        # converte para BGR para usar cv2 quando necessário
+        frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
+        # detecção de face (MediaPipe espera RGB)
+        results = face_mesh.process(frame_rgb)
+        cx, cy = w // 2, h // 2
+        if results.multi_face_landmarks:
+            # pega a maior face detectada
+            best = None
+            best_area = 0
+            for lm in results.multi_face_landmarks:
+                xs = [p.x * w for p in lm.landmark]
+                ys = [p.y * h for p in lm.landmark]
+                xm, xM = min(xs), max(xs)
+                ym, yM = min(ys), max(ys)
+                area = (xM - xm) * (yM - ym)
+                if area > best_area:
+                    best_area = area
+                    best = ( (xm+xM)/2.0, (ym+yM)/2.0 )
+            if best is not None:
+                cx = int(best[0])
+                cy = int(best[1])
+
+        # suavização (evita puxadas bruscas)
+        if last_cx is None:
+            last_cx, last_cy = cx, cy
+        else:
+            last_cx = int(last_cx * (1 - smoothing) + cx * smoothing)
+            last_cy = int(last_cy * (1 - smoothing) + cy * smoothing)
+            cx, cy = last_cx, last_cy
+
+        # crop 9:16 centrado em (cx,cy) sem esticar (apenas cortar)
+        crop_h = target_h
+        crop_w = target_w
+        # limita bordas
+        x1 = int(max(0, min(cx - crop_w // 2, w - crop_w)))
+        y1 = int(max(0, min(cy - crop_h // 2, h - crop_h)))
+        cropped = frame_bgr[y1:y1+crop_h, x1:x1+crop_w]
+
+        # se alguma dimensão for menor (vídeo menor que target), faz pad com preto
+        ch, cw = cropped.shape[:2]
+        if ch != crop_h or cw != crop_w:
+            canvas = np.zeros((crop_h, crop_w, 3), dtype=np.uint8)
+            canvas[0:ch, 0:cw] = cropped
+            cropped = canvas
+
+        # legenda: procura segmento que contenha t (segundos desde início do subclip)
+        if subtitle_segments:
+            text = ""
+            for seg in subtitle_segments:
+                if seg["start"] <= t <= seg["end"]:
+                    text = seg["text"].strip()
+                    break
+            if text:
+                # desenha legenda sobre BGR
+                cropped = draw_subtitle_pil(cropped, text, crop_w)
+
+        # retorna RGB (MoviePy espera RGB)
+        out_rgb = cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB)
+        return out_rgb
+
+    # cria clip processado com MoviePy (mantém áudio depois)
+    print("🎬 Processando clip (pode demorar dependendo do vídeo)...")
+    processed = video.fl(process_frame, apply_to=["video"])
+
+    # escreve vídeo final (mescla áudio original)
+    print("🎶 Renderizando e mesclando áudio...")
+    processed.set_audio(VideoFileClip(input_path).subclip(start, end).audio if (start or end) else video.audio)\
+             .write_videofile(output_path, codec="libx264", audio_codec="aac", threads=0, logger="bar")
+
+    # limpeza
+    face_mesh.close()
+    try:
+        os.remove(audio_tmp)
+    except Exception:
+        pass
+
+    print("✅ Processamento finalizado:", output_path)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Transforma vídeos horizontais em verticais com foco em rostos e legendas.")
-    parser.add_argument("--input", required=True, help="Caminho para o vídeo de entrada. Ex: video.mp4")
-    parser.add_argument("--output", required=True, help="Caminho para o vídeo de saída. Ex: video_vertical.mp4")
-    parser.add_argument("--out_h", type=int, default=1080, help="Altura do vídeo de saída em pixels.")
-    parser.add_argument("--legenda", type=str, default="on", choices=['on', 'off'], help="Adicionar legendas automáticas ('on' ou 'off').")
-    parser.add_argument("--start", type=str, default=None, help="Tempo de início do corte. Formato: hh:mm:ss ou mm:ss")
-    parser.add_argument("--end", type=str, default=None, help="Tempo de fim do corte. Formato: hh:mm:ss ou mm:ss")
+    parser = argparse.ArgumentParser(description="Transforma horizontais em verticais com legendas.")
+    parser.add_argument("--input", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--out_h", type=int, default=1080)
+    parser.add_argument("--legenda", choices=["on","off"], default="on")
+    parser.add_argument("--start", type=str, default=None)
+    parser.add_argument("--end", type=str, default=None)
     args = parser.parse_args()
-    
-    process_video(args.input, args.output, out_h=args.out_h,
-                  legenda=args.legenda, start=args.start, end=args.end)
+
+    process_video(args.input, args.output, out_h=args.out_h, legenda=args.legenda, start=args.start, end=args.end)
