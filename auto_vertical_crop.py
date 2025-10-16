@@ -8,6 +8,7 @@ import mediapipe as mp
 import whisper
 import sys
 import shutil
+import textwrap
 
 # --- FFmpeg: tenta usar PATH ou ffmpeg.exe na pasta ---
 ffmpeg_candidates = ["ffmpeg", os.path.join(os.getcwd(), "ffmpeg.exe")]
@@ -16,19 +17,35 @@ if not ffmpeg_found:
     print("⚠️  Aviso: FFmpeg não encontrado no PATH. Coloque ffmpeg.exe na pasta do script ou instale no sistema.")
 
 def draw_subtitle_pil(frame_bgr, text, width):
-    """Desenha legenda no frame com fundo semitransparente."""
+    """Desenha legenda no frame com fundo semitransparente, ajustando tamanho e quebrando linhas."""
     text = str(text).encode('utf-8', 'ignore').decode('utf-8')
     font_path = "C:\\Windows\\Fonts\\arial.ttf" if os.name == "nt" else "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-    font = ImageFont.truetype(font_path, 36)
+    
+    # Ajusta fonte dinamicamente
+    font_size = 36
+    while font_size > 12:
+        font = ImageFont.truetype(font_path, font_size)
+        # Quebra o texto em múltiplas linhas
+        lines = textwrap.wrap(text, width=int(width / (font_size * 0.6)))
+        line_heights = [font.getbbox(line)[3] - font.getbbox(line)[1] for line in lines]
+        total_height = sum(line_heights) + 10 * len(lines)
+        if total_height + 30 < frame_bgr.shape[0] * 0.35:  # não ocupa mais que 35% da altura
+            break
+        font_size -= 2
+
     img_pil = Image.fromarray(frame_bgr)
     draw = ImageDraw.Draw(img_pil, "RGBA")
-    text_bbox = draw.textbbox((0, 0), text, font=font)
-    text_w = text_bbox[2] - text_bbox[0]
-    text_h = text_bbox[3] - text_bbox[1]
-    x = (width - text_w) // 2
-    y = img_pil.height - text_h - 30
-    draw.rectangle((x - 20, y - 10, x + text_w + 20, y + text_h + 10), fill=(0, 0, 0, 128))
-    draw.text((x, y), text, font=font, fill=(255, 255, 255, 255))
+
+    # calcula posição inicial da legenda (de cima para baixo, dentro do frame)
+    y = img_pil.height - total_height - 20
+    for line, line_h in zip(lines, line_heights):
+        text_bbox = draw.textbbox((0, 0), line, font=font)
+        text_w = text_bbox[2] - text_bbox[0]
+        x = (width - text_w) // 2
+        draw.rectangle((x - 10, y - 5, x + text_w + 10, y + line_h + 5), fill=(0, 0, 0, 128))
+        draw.text((x, y), line, font=font, fill=(255, 255, 255, 255))
+        y += line_h + 10
+
     return np.array(img_pil)
 
 def process_video(input_path, output_path, out_h=1080, legenda="on", start=None, end=None):
