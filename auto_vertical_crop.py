@@ -1,5 +1,4 @@
 import os
-import argparse
 import tempfile
 import cv2
 import numpy as np
@@ -7,7 +6,14 @@ from moviepy.editor import VideoFileClip, AudioFileClip
 from PIL import Image, ImageDraw, ImageFont
 import mediapipe as mp
 import whisper
+import sys
+import shutil
 
+# --- FFmpeg: tenta usar PATH ou ffmpeg.exe na pasta ---
+ffmpeg_candidates = ["ffmpeg", os.path.join(os.getcwd(), "ffmpeg.exe")]
+ffmpeg_found = any(shutil.which(cmd) or os.path.exists(cmd) for cmd in ffmpeg_candidates)
+if not ffmpeg_found:
+    print("⚠️  Aviso: FFmpeg não encontrado no PATH. Coloque ffmpeg.exe na pasta do script ou instale no sistema.")
 
 def draw_subtitle_pil(frame_bgr, text, width):
     """Desenha legenda no frame com fundo semitransparente."""
@@ -25,9 +31,8 @@ def draw_subtitle_pil(frame_bgr, text, width):
     draw.text((x, y), text, font=font, fill=(255, 255, 255, 255))
     return np.array(img_pil)
 
-
 def process_video(input_path, output_path, out_h=1080, legenda="on", start=None, end=None):
-    """Processa vídeo: recorte vertical com rastreamento facial e legendas automáticas."""
+    """Processa vídeo: recorte vertical centralizado no rosto, sem esticar, com legendas automáticas."""
     if not os.path.exists(input_path):
         print(f"ERRO: O arquivo de entrada não foi encontrado em '{input_path}'")
         return
@@ -47,6 +52,7 @@ def process_video(input_path, output_path, out_h=1080, legenda="on", start=None,
         audio_path = tempfile.mktemp(suffix=".mp3")
         video.audio.write_audiofile(audio_path, logger=None)
 
+        # Geração de legendas
         subtitle_dict = {}
         if legenda.lower() == "on":
             print("🗣️  Gerando legendas automáticas com Whisper... Isso pode demorar.")
@@ -54,23 +60,24 @@ def process_video(input_path, output_path, out_h=1080, legenda="on", start=None,
             for seg in result["segments"]:
                 subtitle_dict[(seg["start"], seg["end"])] = seg["text"]
 
-        # Configura o MediaPipe FaceMesh
+        # Configura MediaPipe FaceMesh
         mp_face_mesh = mp.solutions.face_mesh
-        face_mesh = mp_face_mesh.FaceMesh(
-            static_image_mode=False,
-            max_num_faces=1,
-            min_detection_confidence=0.5
-        )
+        face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1, min_detection_confidence=0.5)
         tracking_state = {'last_cx': -1, 'last_cy': -1}
 
         def process_frame(get_frame, t):
             frame = get_frame(t)
             h, w, _ = frame.shape
-            target_aspect_ratio = 9 / 16
-            crop_h = out_h
-            crop_w = int(crop_h * target_aspect_ratio)
-            crop_w -= (crop_w % 2)
 
+            target_aspect_ratio = 9 / 16
+            crop_h = h
+            crop_w = int(crop_h * target_aspect_ratio)
+
+            if crop_w > w:  # ajusta altura se a largura exceder
+                crop_w = w
+                crop_h = int(crop_w / target_aspect_ratio)
+
+            # centro do rosto
             cx, cy = w // 2, h // 2
             results = face_mesh.process(frame)
             if results.multi_face_landmarks:
@@ -81,17 +88,18 @@ def process_video(input_path, output_path, out_h=1080, legenda="on", start=None,
                 if tracking_state['last_cx'] == -1:
                     tracking_state['last_cx'], tracking_state['last_cy'] = cx, cy
 
+            # suavização do rastreamento
             if tracking_state['last_cx'] != -1:
                 cx = int(tracking_state['last_cx'] * 0.9 + cx * 0.1)
                 cy = int(tracking_state['last_cy'] * 0.9 + cy * 0.1)
-
             tracking_state['last_cx'], tracking_state['last_cy'] = cx, cy
 
+            # recorte vertical sem esticar
             x1 = max(0, min(cx - crop_w // 2, w - crop_w))
             y1 = max(0, min(cy - crop_h // 2, h - crop_h))
             cropped_frame_rgb = frame[y1:y1 + crop_h, x1:x1 + crop_w]
 
-            # Adiciona legenda se habilitado
+            # adiciona legenda
             if legenda.lower() == "on":
                 text = ""
                 for (s, e), ttext in subtitle_dict.items():
@@ -100,12 +108,17 @@ def process_video(input_path, output_path, out_h=1080, legenda="on", start=None,
                         break
                 if text:
                     cropped_frame_bgr = cv2.cvtColor(cropped_frame_rgb, cv2.COLOR_RGB2BGR)
-                    processed_bgr = draw_subtitle_pil(cropped_frame_bgr, text.strip(), crop_w)
+                    processed_bgr = draw_subtitle_pil(cropped_frame_bgr, text.strip(), cropped_frame_rgb.shape[1])
                     cropped_frame_rgb = cv2.cvtColor(processed_bgr, cv2.COLOR_BGR2RGB)
 
             return cropped_frame_rgb
 
         processed_clip = video.fl(process_frame)
+
+        # Força largura e altura pares (necessário para x264)
+        final_w = processed_clip.w - processed_clip.w % 2
+        final_h = processed_clip.h - processed_clip.h % 2
+        processed_clip = processed_clip.resize((final_w, final_h))
 
         print("🎶 Montando o vídeo final com áudio...")
         processed_clip.set_audio(AudioFileClip(audio_path)).write_videofile(
@@ -124,8 +137,9 @@ def process_video(input_path, output_path, out_h=1080, legenda="on", start=None,
         print(f"❌ Erro durante o processamento: {e}")
         raise e
 
-
+# --- Permite execução via CLI ---
 if __name__ == "__main__":
+    import argparse
     parser = argparse.ArgumentParser(description="Auto vertical crop com rastreamento facial e legendas automáticas.")
     parser.add_argument("--input", required=True, help="Caminho do vídeo de entrada.")
     parser.add_argument("--output", required=True, help="Caminho do vídeo de saída.")
