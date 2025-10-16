@@ -2,84 +2,96 @@
 
 Transforma vídeos horizontais em verticais (proporção 9:16 para Reels/Shorts/TikTok), dando zoom inteligente em rostos, com legendas automáticas opcionais e delimitação de corte.
 
-## 🚀 Como Usar: Guia de Instalação e Execução 
+## 📄 Descrição do Projeto
 
-O programa pode ser executado via uma interface gráfica simples (`app.py`) ou diretamente pela linha de comando (`auto_vertical_crop.py`).
+O **Videos-na-vertical** transforma vídeos horizontais em verticais, ideais para **Reels, Shorts e TikTok**.
 
-### 1. Preparação do Ambiente
+  * Recorte automático inteligente, focando em rostos com **MediaPipe FaceMesh**.
+  * Legendas automáticas opcionais via **OpenAI Whisper**.
+  * Ajuste de legenda automático para caber no vídeo sem cortar linhas.
+  * Mantém o conteúdo vertical sem esticar ou distorcer.
+  * Interface gráfica amigável (GUI) e suporte a linha de comando (CLI).
 
-1.  **Estrutura da Pasta:** Coloque os arquivos `auto_vertical_crop.py`, `app.py`, e `requirements.txt` na pasta principal do seu projeto. Certifique-se de que a subpasta `src/fonts` contém o arquivo **`arial.ttf`**.
+## 🔧 Pré-requisitos
 
-2.  **Abra o Terminal** (ou **Prompt de Comando/PowerShell** no Windows) na pasta do projeto.
+  * **Python 3.10+** (recomendado)
+  * Bibliotecas Python:
+    ```
+    pip install moviepy opencv-python pillow mediapipe openai-whisper numpy ttkbootstrap
+    ```
+  * **FFmpeg** instalado ou presente na mesma pasta do script.
+    ```
+    ffmpeg -version
+    ```
+  * Sistema operacional compatível: Windows, Linux e macOS.
 
-3.  **Crie e Ative o Ambiente Virtual (VENV):**
+## 📂 Estrutura de Pastas Recomendada
 
-    ```bash
-    # 1. Cria o ambiente virtual
+```
+Videos-na-vertical/
+├─ auto_vertical_crop.py
+├─ app.py
+├─ requirements.txt
+├─ README.md
+├─ src/
+│  └─ fonts/
+│     └─ arial.ttf
+```
+
+## 🚀 Como Usar: Guia de Instalação e Execução
+
+O programa pode ser executado via **GUI (app.py)** ou diretamente pela **linha de comando (auto\_vertical\_crop.py)**.
+
+### 1\. Preparação do Ambiente
+
+1.  Abra o terminal (ou **Prompt de Comando/PowerShell** no Windows) na pasta do projeto.
+2.  Crie e ative o ambiente virtual (VENV):
+    ```
     python -m venv venv
 
-    # 2. Ative o ambiente virtual
+    # Ative o ambiente virtual
     # No Windows:
     .\venv\Scripts\activate
     # No macOS/Linux:
     source venv/bin/activate
     ```
-
-4.  **Instale as Dependências (Pacotes Python):**
-
-    ```bash
+3.  Instale as dependências:
+    ```
     pip install -r requirements.txt
     ```
+4.  Certifique-se de que o arquivo `arial.ttf` está dentro de `src/fonts`.
 
-5.  **Instalações Específicas de SO (CRUCIAL):**
-    * **macOS (Homebrew):** Para a GUI funcionar, você precisa do pacote `tkinter` separado:
-        ```bash
-        brew install python-tk@3.11
-        ```
-    * **Windows / Linux:** Não é necessário instalar nada extra aqui. O `pip install` já é suficiente.
+### 2\. Execução do Programa
 
-### 2. Execução do Programa
+#### Opção A (GUI - Recomendada)
 
-#### Opção A (Recomendada): Execução via Interface Gráfica (GUI)
-
-Esta é a forma mais fácil de usar, com validação de tempo e salvamento fácil.
-
-1.  **Certifique-se que o VENV está ativo.**
-
-2.  **Execute o aplicativo:**
-
-    ```bash
+1.  Certifique-se que o VENV está ativo.
+2.  Execute:
+    ```
     python app.py
     ```
+3.  Na Janela:
+      * **1. SELECIONAR ARQUIVO DE VÍDEO:** Escolha o vídeo desejado.
+      * **2. Tempos de Corte:** Defina início e fim em `hh:mm:ss`. Se deixado em 00:00:00, processa todo o vídeo.
+      * **Checkbox:** Ligue ou desligue legendas automáticas.
+      * **3. PROCESSAR E SALVAR:** Escolha onde salvar o vídeo final.
 
-3.  **Na Janela:**
-    * **1. SELECIONAR ARQUIVO DE VÍDEO:** Abre a janela do sistema para escolher o vídeo.
-    * **2. Tempos de Corte:** Use as caixas de **`Spinbox`** (setinhas) para definir o corte exato em `hh:mm:ss`. Se deixado em `00:00:00`, o programa processa o vídeo inteiro.
-    * **Checkbox:** Use o checkbox para **Ligar ou Desligar** as legendas automáticas.
-    * **3. PROCESSAR E SALVAR:** Abre a janela "Salvar como..." para definir o nome e o local do vídeo final.
+#### Opção B (Linha de Comando - CLI)
 
-#### Opção B: Execução via Linha de Comando (CLI)
-
-Use para automação ou testes diretos.
-
-1.  **Certifique-se que o VENV está ativo.**
-
-2.  **Execute o comando:**
-
-    ```bash
+1.  Certifique-se que o VENV está ativo.
+2.  Execute:
+    ```
     python auto_vertical_crop.py --input XX.mp4 --output XX_vertical.mp4 --start hh:mm:ss --end hh:mm:ss --out_h 1080 --legenda on
     ```
 
-    | Parâmetro | Descrição | Exemplo |
-    | :--- | :--- | :--- |
-    | `--input` | Caminho do vídeo de entrada. | `video3.mp4` |
-    | `--output` | Caminho do vídeo final. | `video_final.mp4` |
-    | `--start` | Tempo de início do corte (Opcional). | `00:00:15` |
-    | `--end` | Tempo de fim do corte (Opcional). | `00:00:45` |
-    | `--legenda` | Liga (`on`) ou Desliga (`off`) a legenda. | `off` |
+| Parâmetro | Descrição | Exemplo |
+| :--- | :--- | :--- |
+| --input | Caminho do vídeo de entrada. | video3.mp4 |
+| --output | Caminho do vídeo final. | video\_final.mp4 |
+| --start | Tempo de início do corte (Opcional). | 00:00:15 |
+| --end | Tempo de fim do corte (Opcional). | 00:00:45 |
+| --legenda | Liga (on) ou desliga (off) a legenda. | off |
 
----
+### ⚠️ Limite de Duração
 
-### ⚠️ Limite de Duração para Mídias Sociais
-
-O programa aplica um limite máximo de **60 segundos** para o corte total do vídeo, o que é o limite ideal para Reels, Shorts e TikTok, garantindo que seu conteúdo seja aceito em todas as plataformas.
+O corte total recomendado é até **60 segundos** para Reels, Shorts e TikTok.
