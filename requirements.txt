@@ -1,7 +1,8 @@
 opencv-python
-moviepy
+moviepy==1.0.3 
 mediapipe
 openai-whisper
 numpy
 Pillow
 tqdm
+ttkbootstrap
