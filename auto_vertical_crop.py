@@ -20,6 +20,10 @@ except ImportError:
 def draw_subtitle_pil(frame, text, frame_width):
     """
     @description Desenha o texto da legenda com fundo semitransparente e melhor espaçamento.
+    @param frame O frame (imagem) onde o texto será desenhado.
+    @param text O texto da legenda a ser exibido.
+    @param frame_width A largura do frame para cálculo de centralização.
+    @return O frame com a legenda desenhada.
     """
     frame_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)).convert("RGBA")
     overlay = Image.new("RGBA", frame_pil.size, (255, 255, 255, 0))
@@ -35,7 +39,6 @@ def draw_subtitle_pil(frame, text, frame_width):
     selected_font = None
     font_size = max(28, int(frame_width / 18))
 
-    # Tenta carregar a fonte Arial nos caminhos mais comuns
     for path in font_options:
         if os.path.exists(path):
             try:
@@ -45,7 +48,6 @@ def draw_subtitle_pil(frame, text, frame_width):
             except Exception:
                 continue
 
-    # Fallback para a fonte padrão do Pillow
     if selected_font is None:
         print(f"\nAtenção: Nenhuma fonte Arial encontrada. Usando fonte padrão.")
         font = ImageFont.load_default()
@@ -109,20 +111,22 @@ def draw_subtitle_pil(frame, text, frame_width):
     return cv2.cvtColor(np.array(combined), cv2.COLOR_RGBA2BGR)
 
 
-# Removida a classe CustomLogger
-
 def process_video(input_path, output_path, out_h=1080, legenda="on", start=None, end=None):
     """
     @description Função principal que carrega um vídeo, detecta rostos para criar um corte vertical,
                  gera legendas automáticas e renderiza o vídeo final.
+    @param input_path Caminho para o vídeo de entrada.
+    @param output_path Caminho para salvar o vídeo processado.
+    @param out_h Altura final do vídeo em pixels.
+    @param legenda 'on' para gerar legendas, 'off' para pular.
+    @param start Tempo de início do corte (e.g., 'hh:mm:ss').
+    @param end Tempo de fim do corte (e.g., 'hh:mm:ss').
     """
     if not os.path.exists(input_path):
         print(f"ERRO: O arquivo de entrada não foi encontrado em '{input_path}'")
         return
 
-    try:
-        # Removido custom_logger = CustomLogger(stream=sys.stdout)
-        
+    try:        
         print("🗣️  Carregando Whisper (base)...")
         model = whisper.load_model("base") 
         
@@ -132,6 +136,7 @@ def process_video(input_path, output_path, out_h=1080, legenda="on", start=None,
         start_time = start if start and start.strip() != "" else None
         end_time = end if end and end.strip() != "" else None
         
+        # O subclip é feito aqui. Se os tempos forem inválidos, o MoviePy lançará um ValueError
         video = video_full.subclip(start_time, end_time) if start_time or end_time else video_full
         
         audio_path = tempfile.mktemp(suffix=".mp3")
@@ -205,7 +210,7 @@ def process_video(input_path, output_path, out_h=1080, legenda="on", start=None,
             output_path, 
             codec="libx264", 
             audio_codec="aac", 
-            logger='bar', # Usa logger nativo do MoviePy
+            logger='bar', # MoviePy usa este logger embutido
             ffmpeg_params=['-pix_fmt', 'yuv420p']
         )
 

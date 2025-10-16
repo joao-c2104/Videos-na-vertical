@@ -6,11 +6,10 @@ import threading
 import multiprocessing as mp
 import re
 
-# Tenta importar ttkbootstrap para um visual moderno
 try:
     from ttkbootstrap import Style
     from ttkbootstrap.constants import *
-    from ttkbootstrap.widgets import Frame, Button, Entry, Label, Spinbox, Progressbar
+    from ttkbootstrap.widgets import Frame, Button, Entry, Label, Spinbox, Progressbar, Checkbutton
     Widget = sys.modules['ttkbootstrap.widgets']
     
 except ImportError:
@@ -23,6 +22,7 @@ except ImportError:
         Entry = Widget.Entry
         Spinbox = Widget.Spinbox
         Progressbar = Widget.Progressbar
+        Checkbutton = Widget.Checkbutton
         def __init__(self, theme): pass
         @property
         def master(self): return tk.Tk()
@@ -38,21 +38,18 @@ except ImportError:
 status_queue = mp.Queue()
 processing_active = False
 
-def worker_process(input_path, output_path, start, end, q):
+def worker_process(input_path, output_path, start, end, legenda, q):
     """
     @description Função alvo que roda no processo separado (isolado da GUI).
-                 Roda a lógica principal do CLI.
     """
-    # ⚠️ Ação: O stdout/stderr VAI para o terminal, como no CLI, para máxima estabilidade.
     
     try:
-        # Executa o processamento do vídeo
         process_video(
             input_path=input_path,
             output_path=output_path,
             start=start,
             end=end,
-            legenda="on"
+            legenda=legenda
         )
         q.put("SUCCESS:✅ Concluído! Vídeo salvo com sucesso.")
     except Exception as e:
@@ -61,22 +58,38 @@ def worker_process(input_path, output_path, start, end, q):
         q.put("FINISHED")
 
 
-def format_time_input(h_var, m_var, s_var):
+def time_to_seconds(h_var, m_var, s_var):
     """
-    @description Monta os valores dos Spinboxes no formato hh:mm:ss esperado pelo MoviePy.
+    @description Converte hh:mm:ss em segundos.
     """
     try:
         h = int(h_var.get() or '0')
         m = int(m_var.get() or '0')
         s = int(s_var.get() or '0')
         
-        if h == 0 and m == 0 and s == 0:
-            return None
-            
-        return f"{h:02}:{m:02}:{s:02}"
+        if h < 0 or m < 0 or s < 0 or m > 59 or s > 59:
+             raise ValueError("Tempo inválido")
+        
+        return h * 3600 + m * 60 + s
     except ValueError:
-        messagebox.showerror("Erro de Tempo", "O tempo de corte deve ser numérico (hh:mm:ss).")
         return "ERROR_INVALID_TIME"
+
+
+def format_time_input(h_var, m_var, s_var):
+    """
+    @description Monta os valores dos Spinboxes no formato hh:mm:ss esperado pelo MoviePy.
+    """
+    seconds = time_to_seconds(h_var, m_var, s_var)
+    if seconds == "ERROR_INVALID_TIME":
+        return "ERROR_INVALID_TIME"
+        
+    if seconds == 0:
+        return None
+        
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    return f"{h:02}:{m:02}:{s:02}"
 
 
 def start_processing():
@@ -87,12 +100,21 @@ def start_processing():
     
     input_path = input_path_var.get()
     
-    start_time_formatted = format_time_input(start_h_var, start_m_var, start_s_var)
-    end_time_formatted = format_time_input(end_h_var, end_m_var, end_s_var)
+    start_sec = time_to_seconds(start_h_var, start_m_var, start_s_var)
+    end_sec = time_to_seconds(end_h_var, end_m_var, end_s_var)
     
-    if start_time_formatted == "ERROR_INVALID_TIME" or end_time_formatted == "ERROR_INVALID_TIME":
+    if start_sec == "ERROR_INVALID_TIME" or end_sec == "ERROR_INVALID_TIME":
+        messagebox.showerror("Erro de Entrada", "Por favor, insira valores numéricos válidos (0-59 para minutos/segundos).")
         return
     
+    # ⚠️ VALIDAÇÃO DE LIMITE DE DURAÇÃO (60 SEGUNDOS)
+    if start_sec is not None and end_sec is not None and end_sec > start_sec:
+        duration = end_sec - start_sec
+        MAX_DURATION_SECONDS = 60
+        if duration > MAX_DURATION_SECONDS:
+            messagebox.showerror("Limite de Duração", f"O corte solicitado ({duration}s) excede o limite de {MAX_DURATION_SECONDS} segundos para vídeos curtos.")
+            return
+
     if processing_active:
         messagebox.showwarning("Aviso", "O processamento já está em andamento.")
         return
@@ -111,6 +133,9 @@ def start_processing():
         status_var.set("Operação cancelada.")
         return
 
+    # Obtém o status da legenda (on/off)
+    legenda_status = "on" if legenda_var.get() == 1 else "off"
+    
     processing_active = True
     process_button.config(state=tk.DISABLED)
     progress_bar.config(value=0, mode='indeterminate')
@@ -119,7 +144,10 @@ def start_processing():
 
     p = mp.Process(
         target=worker_process,
-        args=(input_path, output_path, start_time_formatted, end_time_formatted, status_queue)
+        args=(input_path, output_path, 
+              format_time_input(start_h_var, start_m_var, start_s_var), 
+              format_time_input(end_h_var, end_m_var, end_s_var), 
+              legenda_status, status_queue)
     )
     p.start()
 
@@ -133,19 +161,18 @@ def monitor_queue(process):
     """
     global processing_active
     
-    # Lista de mensagens de log esperadas (para atualizar o status da GUI)
-    log_messages = [
-        "Carregando Whisper (base)...",
-        "Lendo o arquivo de vídeo...",
-        "Gerando legendas automáticas com Whisper...",
-        "Montando o vídeo final com áudio..."
-    ]
-    
-    log_index = 0
-    
     while True:
         if not status_queue.empty():
             message = status_queue.get()
+            
+            # Tenta capturar o progresso do MoviePy
+            progress_match = re.search(r't:\s*(\d+)%', message)
+            
+            if progress_match:
+                percentage = int(progress_match.group(1))
+                root.after(0, lambda: progress_bar.stop())
+                root.after(0, lambda: progress_bar.config(mode='determinate', value=percentage, maximum=100))
+                root.after(0, lambda: status_var.set(f"Renderizando... {percentage}% concluído"))
             
             if message.startswith("SUCCESS:"):
                 success_msg = message.replace("SUCCESS:", "")
@@ -170,11 +197,9 @@ def monitor_queue(process):
                 root.after(0, lambda: process_button.config(state=tk.NORMAL))
                 break
             
-            else:
-                # Log de status (Carregando Whisper, etc.)
-                root.after(0, lambda: status_var.set(message))
+            elif not progress_match:
+                root.after(0, lambda: status_var.set(message[-100:]))
 
-        # Se o processo terminar por algum motivo (e.g., crash)
         if not process.is_alive():
             if status_var.get().startswith("⏳ Processando"):
                 root.after(0, lambda: status_var.set("❌ Processo encerrado inesperadamente. Verifique o terminal para erros."))
@@ -210,7 +235,7 @@ if __name__ == '__main__':
         root = tk.Tk()
 
     root.title("Auto Vertical Crop (Reels/Shorts)")
-    root.geometry("550x380")
+    root.geometry("550x420")
     root.resizable(False, False)
 
     # --- Variáveis de Controle do Tkinter ---
@@ -222,6 +247,7 @@ if __name__ == '__main__':
     end_h_var = tk.StringVar(value='00')
     end_m_var = tk.StringVar(value='00')
     end_s_var = tk.StringVar(value='00')
+    legenda_var = tk.IntVar(value=1) # 1 = Ligado por padrão
     status_var = tk.StringVar(value="Selecione um vídeo e defina os tempos de corte.")
 
     # --- Criação dos Widgets ---
@@ -280,6 +306,13 @@ if __name__ == '__main__':
     
     time_grid_frame.columnconfigure(7, weight=1)
     
+    # Checkbox de Legenda (Removido o bootstyle="toggle" problemático)
+    legenda_checkbox = Widget.Checkbutton(frame, 
+                                          text="Incluir Legendas Automáticas", 
+                                          variable=legenda_var)
+    legenda_checkbox.pack(fill=tk.X, anchor=tk.W, pady=(10, 5))
+
+
     # Linha 3: Botão de Processar
     process_button = Widget.Button(frame, text="3. PROCESSAR E SALVAR (Com Legendas)", command=start_processing, bootstyle="success")
     process_button.pack(fill=tk.X, pady=(15, 0))
